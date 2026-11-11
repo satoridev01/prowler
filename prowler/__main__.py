@@ -137,6 +137,7 @@ from prowler.lib.outputs.outputs import extract_findings_statistics, report
 from prowler.lib.outputs.sarif.sarif import SARIF
 from prowler.lib.outputs.slack.slack import Slack
 from prowler.lib.outputs.summary_table import display_summary_table
+from prowler.lib.verification.runner import verify_findings
 from prowler.providers.alibabacloud.models import AlibabaCloudOutputOptions
 from prowler.providers.aws.lib.s3.s3 import S3
 from prowler.providers.aws.lib.security_hub.security_hub import SecurityHub
@@ -635,6 +636,17 @@ def prowler():
             )
         except Exception:
             continue
+
+    if getattr(args, "verify", False):
+        try:
+            finding_outputs = verify_findings(
+                finding_outputs,
+                account_id=global_provider.identity.account,
+                profile=global_provider.identity.profile,
+            )
+        except ValueError as error:
+            logger.critical(error)
+            sys.exit(1)
 
     # Extract findings stats
     stats = extract_findings_statistics(finding_outputs)

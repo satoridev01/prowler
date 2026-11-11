@@ -68,6 +68,11 @@ class Test_Parser:
         assert "csv" in parsed.output_formats
         assert "json-ocsf" in parsed.output_formats
         assert "html" in parsed.output_formats
+
+    def test_aws_verify_argument(self):
+        parsed = self.parser.parse([prowler_command, "aws", "--verify"])
+
+        assert parsed.verify is True
         assert not parsed.output_filename
         assert "output" in parsed.output_directory
         assert not parsed.verbose

@@ -97,6 +97,11 @@ class SARIF(Output):
             if location is not None:
                 result["locations"] = [location]
 
+            if finding.verification:
+                result["properties"] = {
+                    "verification": finding.verification.dict(exclude_none=True)
+                }
+
             results.append(result)
 
         sarif_document = {

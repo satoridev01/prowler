@@ -186,6 +186,15 @@ class OCSF(Output):
                         "scan_id": str(scan_id),
                         "provider_uid": finding.provider_uid or finding.account_uid,
                         "provider": finding.provider,
+                        **(
+                            {
+                                "verification": finding.verification.dict(
+                                    exclude_none=True
+                                )
+                            }
+                            if finding.verification
+                            else {}
+                        ),
                     },
                 )
                 if finding.provider != "kubernetes":

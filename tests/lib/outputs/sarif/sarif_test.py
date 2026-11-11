@@ -5,6 +5,11 @@ import tempfile
 import pytest
 
 from prowler.lib.outputs.sarif.sarif import SARIF, SARIF_SCHEMA_URL, SARIF_VERSION
+from prowler.lib.verification.models import (
+    Verification,
+    VerificationOutcome,
+    VerificationRisk,
+)
 from tests.lib.outputs.fixtures.fixtures import generate_finding_output
 
 
@@ -49,6 +54,22 @@ class TestSARIF:
         run = sarif.data[0]["runs"][0]
         assert len(run["results"]) == 0
         assert len(run["tool"]["driver"]["rules"]) == 0
+
+    def test_transform_includes_verification_properties(self):
+        finding = generate_finding_output(
+            status="FAIL",
+            verification=Verification(
+                outcome=VerificationOutcome.NOT_REPRODUCED,
+                verifier="test-verifier",
+                risk=VerificationRisk.PASSIVE,
+            ),
+        )
+
+        result = SARIF(findings=[finding], file_path=None).data[0]["runs"][0][
+            "results"
+        ][0]
+
+        assert result["properties"]["verification"]["outcome"] == "not_reproduced"
 
     def test_transform_muted_finding_excluded(self):
         finding = generate_finding_output(status="FAIL", severity="high", muted=True)

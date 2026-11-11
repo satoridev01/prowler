@@ -30,6 +30,12 @@ from pydantic.v1 import BaseModel as V1BaseModel
 
 from prowler.config.config import prowler_version
 from prowler.lib.outputs.ocsf.ocsf import OCSF
+from prowler.lib.verification.models import (
+    PoC,
+    Verification,
+    VerificationOutcome,
+    VerificationRisk,
+)
 from tests.lib.outputs.fixtures.fixtures import generate_finding_output
 from tests.providers.aws.utils import AWS_REGION_EU_WEST_1
 
@@ -143,6 +149,20 @@ class TestOCSF:
         assert output_data.time_dt == datetime.fromtimestamp(
             1619600000, tz=timezone.utc
         )
+
+    def test_transform_includes_verification(self):
+        verification = Verification(
+            outcome=VerificationOutcome.VERIFIED,
+            verifier="aws-cli/s3-anonymous-head-bucket",
+            risk=VerificationRisk.PASSIVE,
+            poc=PoC(tool="aws-cli", command=["aws", "s3api", "head-bucket"]),
+        )
+        output = OCSF(
+            [generate_finding_output(status="FAIL", verification=verification)]
+        ).data[0]
+
+        assert output.unmapped["verification"]["outcome"] == "verified"
+        assert output.unmapped["verification"]["poc"]["tool"] == "aws-cli"
 
     def test_transform_mitre_attacks_from_multiple_finding_compliance_ids(self):
         finding = generate_finding_output(

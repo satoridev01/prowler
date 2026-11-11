@@ -191,6 +191,18 @@ def init_parser(self):
         help="Fix the failed findings that can be fixed by Prowler",
     )
 
+    verification_subparser = aws_parser.add_argument_group(
+        "Dynamic Finding Verification"
+    )
+    verification_subparser.add_argument(
+        "--verify",
+        action="store_true",
+        help=(
+            "Run curated dynamic verifiers for supported failed findings. "
+            "Requires PROWLER_VERIFY_ALLOWED_ACCOUNT_IDS to include the audited account."
+        ),
+    )
+
 
 def validate_session_duration(session_duration: int) -> int:
     """validate_session_duration validates that the input session_duration is valid"""

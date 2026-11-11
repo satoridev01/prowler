@@ -4,6 +4,7 @@ from typing import Union
 from prowler.config.config import prowler_version
 from prowler.lib.check.models import CheckMetadata, Code, Recommendation, Remediation
 from prowler.lib.outputs.finding import Finding
+from prowler.lib.verification.models import Verification
 from tests.providers.aws.utils import AWS_ACCOUNT_NUMBER, AWS_REGION_EU_WEST_1
 
 
@@ -47,6 +48,7 @@ def generate_finding_output(
     provider_uid: str = None,
     account_ou_uid: str = "ou-abc1-12345678",
     account_ou_name: str = "Production/WebServices",
+    verification: Verification = None,
 ) -> Finding:
     if check_type is None:
         check_type = (
@@ -111,4 +113,5 @@ def generate_finding_output(
             AdditionalURLs=additional_urls,
         ),
         prowler_version=prowler_version,
+        verification=verification,
     )

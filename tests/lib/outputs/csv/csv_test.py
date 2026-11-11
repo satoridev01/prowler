@@ -13,6 +13,12 @@ from prowler.config.config import prowler_version
 from prowler.lib.outputs.csv.csv import CSV
 from prowler.lib.outputs.finding import Finding
 from prowler.lib.outputs.output import Output
+from prowler.lib.verification.models import (
+    PoC,
+    Verification,
+    VerificationOutcome,
+    VerificationRisk,
+)
 from tests.lib.outputs.fixtures.fixtures import generate_finding_output
 from tests.providers.aws.utils import AWS_ACCOUNT_NUMBER, AWS_REGION_EU_WEST_1
 
@@ -113,6 +119,28 @@ class TestCSV:
         assert output_data["PROWLER_VERSION"] == prowler_version
         assert output_data["ACCOUNT_OU_UID"] == "ou-abc1-12345678"
         assert output_data["ACCOUNT_OU_NAME"] == "Production/WebServices"
+        assert output_data["VERIFICATION_OUTCOME"] == ""
+        assert output_data["POC_COMMAND"] == ""
+
+    def test_output_transform_with_verification_poc(self):
+        verification = Verification(
+            outcome=VerificationOutcome.VERIFIED,
+            verifier="aws-cli/s3-anonymous-head-bucket",
+            risk=VerificationRisk.PASSIVE,
+            poc=PoC(
+                tool="aws-cli",
+                command=["aws", "s3api", "head-bucket", "--bucket", "my bucket"],
+                exit_code=0,
+                evidence="Anonymous request succeeded",
+            ),
+        )
+        output = CSV([generate_finding_output(verification=verification)])
+
+        assert output.data[0]["VERIFICATION_OUTCOME"] == "verified"
+        assert output.data[0]["VERIFICATION_RISK"] == "passive"
+        assert output.data[0]["POC_TOOL"] == "aws-cli"
+        assert output.data[0]["POC_COMMAND"].endswith("--bucket 'my bucket'")
+        assert output.data[0]["POC_EXIT_CODE"] == 0
 
     @freeze_time(datetime.now())
     def test_csv_write_to_file(self):
@@ -127,7 +155,7 @@ class TestCSV:
             output.batch_write_data_to_file()
 
         mock_file.seek(0)
-        expected_csv = f"AUTH_METHOD;TIMESTAMP;ACCOUNT_UID;ACCOUNT_NAME;ACCOUNT_EMAIL;ACCOUNT_ORGANIZATION_UID;ACCOUNT_ORGANIZATION_NAME;ACCOUNT_TAGS;FINDING_UID;PROVIDER;CHECK_ID;CHECK_TITLE;CHECK_TYPE;STATUS;STATUS_EXTENDED;MUTED;SERVICE_NAME;SUBSERVICE_NAME;SEVERITY;RESOURCE_TYPE;RESOURCE_UID;RESOURCE_NAME;RESOURCE_DETAILS;RESOURCE_TAGS;PARTITION;REGION;DESCRIPTION;RISK;RELATED_URL;REMEDIATION_RECOMMENDATION_TEXT;REMEDIATION_RECOMMENDATION_URL;REMEDIATION_CODE_NATIVEIAC;REMEDIATION_CODE_TERRAFORM;REMEDIATION_CODE_CLI;REMEDIATION_CODE_OTHER;COMPLIANCE;CATEGORIES;DEPENDS_ON;RELATED_TO;NOTES;PROWLER_VERSION;ADDITIONAL_URLS;ACCOUNT_OU_UID;ACCOUNT_OU_NAME\r\nprofile: default;{datetime.now()};123456789012;123456789012;;test-organization-id;test-organization;test-tag:test-value;test-unique-finding;aws;service_test_check_id;service_test_check_id;Software and Configuration Checks/AWS Security Best Practices/Network Reachability;PASS;;False;service;;high;test-resource;;;;;aws;eu-west-1;check description;test-risk;;;;;;;;test-compliance: test-compliance;encryption;test-dependency;test-related-to;test-notes;{prowler_version};https://docs.aws.amazon.com/prescriptive-guidance/latest/migration-operations-integration/best-practices.html | https://docs.aws.amazon.com/prescriptive-guidance/latest/migration-operations-integration/introduction.html;ou-abc1-12345678;Production/WebServices\r\n"
+        expected_csv = f"AUTH_METHOD;TIMESTAMP;ACCOUNT_UID;ACCOUNT_NAME;ACCOUNT_EMAIL;ACCOUNT_ORGANIZATION_UID;ACCOUNT_ORGANIZATION_NAME;ACCOUNT_TAGS;FINDING_UID;PROVIDER;CHECK_ID;CHECK_TITLE;CHECK_TYPE;STATUS;STATUS_EXTENDED;MUTED;SERVICE_NAME;SUBSERVICE_NAME;SEVERITY;RESOURCE_TYPE;RESOURCE_UID;RESOURCE_NAME;RESOURCE_DETAILS;RESOURCE_TAGS;PARTITION;REGION;DESCRIPTION;RISK;RELATED_URL;REMEDIATION_RECOMMENDATION_TEXT;REMEDIATION_RECOMMENDATION_URL;REMEDIATION_CODE_NATIVEIAC;REMEDIATION_CODE_TERRAFORM;REMEDIATION_CODE_CLI;REMEDIATION_CODE_OTHER;COMPLIANCE;CATEGORIES;DEPENDS_ON;RELATED_TO;NOTES;PROWLER_VERSION;ADDITIONAL_URLS;ACCOUNT_OU_UID;ACCOUNT_OU_NAME;VERIFICATION_OUTCOME;VERIFICATION_VERIFIER;VERIFICATION_RISK;VERIFICATION_REASON;POC_TOOL;POC_COMMAND;POC_EXIT_CODE;POC_EVIDENCE;POC_STDOUT;POC_STDERR;POC_CLEANUP_STATUS\r\nprofile: default;{datetime.now()};123456789012;123456789012;;test-organization-id;test-organization;test-tag:test-value;test-unique-finding;aws;service_test_check_id;service_test_check_id;Software and Configuration Checks/AWS Security Best Practices/Network Reachability;PASS;;False;service;;high;test-resource;;;;;aws;eu-west-1;check description;test-risk;;;;;;;;test-compliance: test-compliance;encryption;test-dependency;test-related-to;test-notes;{prowler_version};https://docs.aws.amazon.com/prescriptive-guidance/latest/migration-operations-integration/best-practices.html | https://docs.aws.amazon.com/prescriptive-guidance/latest/migration-operations-integration/introduction.html;ou-abc1-12345678;Production/WebServices;;;;;;;;;;;\r\n"
         content = mock_file.read()
 
         assert content == expected_csv
@@ -228,7 +256,7 @@ class TestCSV:
             with patch.object(temp_file, "close", return_value=None):
                 csv.batch_write_data_to_file()
 
-            expected_csv = f"AUTH_METHOD;TIMESTAMP;ACCOUNT_UID;ACCOUNT_NAME;ACCOUNT_EMAIL;ACCOUNT_ORGANIZATION_UID;ACCOUNT_ORGANIZATION_NAME;ACCOUNT_TAGS;FINDING_UID;PROVIDER;CHECK_ID;CHECK_TITLE;CHECK_TYPE;STATUS;STATUS_EXTENDED;MUTED;SERVICE_NAME;SUBSERVICE_NAME;SEVERITY;RESOURCE_TYPE;RESOURCE_UID;RESOURCE_NAME;RESOURCE_DETAILS;RESOURCE_TAGS;PARTITION;REGION;DESCRIPTION;RISK;RELATED_URL;REMEDIATION_RECOMMENDATION_TEXT;REMEDIATION_RECOMMENDATION_URL;REMEDIATION_CODE_NATIVEIAC;REMEDIATION_CODE_TERRAFORM;REMEDIATION_CODE_CLI;REMEDIATION_CODE_OTHER;COMPLIANCE;CATEGORIES;DEPENDS_ON;RELATED_TO;NOTES;PROWLER_VERSION;ADDITIONAL_URLS;ACCOUNT_OU_UID;ACCOUNT_OU_NAME\nprofile: default;{datetime.now()};123456789012;123456789012;;test-organization-id;test-organization;test-tag:test-value;test-unique-finding;aws;service_test_check_id;service_test_check_id;Software and Configuration Checks/AWS Security Best Practices/Network Reachability;PASS;;False;service;;high;test-resource;;;;;aws;eu-west-1;check description;test-risk;;;;;;;;test-compliance: test-compliance;encryption;test-dependency;test-related-to;test-notes;{prowler_version};https://docs.aws.amazon.com/prescriptive-guidance/latest/migration-operations-integration/best-practices.html | https://docs.aws.amazon.com/prescriptive-guidance/latest/migration-operations-integration/introduction.html;ou-abc1-12345678;Production/WebServices\n"
+            expected_csv = f"AUTH_METHOD;TIMESTAMP;ACCOUNT_UID;ACCOUNT_NAME;ACCOUNT_EMAIL;ACCOUNT_ORGANIZATION_UID;ACCOUNT_ORGANIZATION_NAME;ACCOUNT_TAGS;FINDING_UID;PROVIDER;CHECK_ID;CHECK_TITLE;CHECK_TYPE;STATUS;STATUS_EXTENDED;MUTED;SERVICE_NAME;SUBSERVICE_NAME;SEVERITY;RESOURCE_TYPE;RESOURCE_UID;RESOURCE_NAME;RESOURCE_DETAILS;RESOURCE_TAGS;PARTITION;REGION;DESCRIPTION;RISK;RELATED_URL;REMEDIATION_RECOMMENDATION_TEXT;REMEDIATION_RECOMMENDATION_URL;REMEDIATION_CODE_NATIVEIAC;REMEDIATION_CODE_TERRAFORM;REMEDIATION_CODE_CLI;REMEDIATION_CODE_OTHER;COMPLIANCE;CATEGORIES;DEPENDS_ON;RELATED_TO;NOTES;PROWLER_VERSION;ADDITIONAL_URLS;ACCOUNT_OU_UID;ACCOUNT_OU_NAME;VERIFICATION_OUTCOME;VERIFICATION_VERIFIER;VERIFICATION_RISK;VERIFICATION_REASON;POC_TOOL;POC_COMMAND;POC_EXIT_CODE;POC_EVIDENCE;POC_STDOUT;POC_STDERR;POC_CLEANUP_STATUS\nprofile: default;{datetime.now()};123456789012;123456789012;;test-organization-id;test-organization;test-tag:test-value;test-unique-finding;aws;service_test_check_id;service_test_check_id;Software and Configuration Checks/AWS Security Best Practices/Network Reachability;PASS;;False;service;;high;test-resource;;;;;aws;eu-west-1;check description;test-risk;;;;;;;;test-compliance: test-compliance;encryption;test-dependency;test-related-to;test-notes;{prowler_version};https://docs.aws.amazon.com/prescriptive-guidance/latest/migration-operations-integration/best-practices.html | https://docs.aws.amazon.com/prescriptive-guidance/latest/migration-operations-integration/introduction.html;ou-abc1-12345678;Production/WebServices;;;;;;;;;;;\n"
 
             temp_file.seek(0)
 

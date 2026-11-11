@@ -1,4 +1,5 @@
 from csv import DictWriter
+from shlex import join
 from typing import List
 
 from prowler.lib.logger import logger
@@ -84,6 +85,31 @@ class CSV(Output):
                 )
                 finding_dict["ACCOUNT_OU_UID"] = finding.account_ou_uid
                 finding_dict["ACCOUNT_OU_NAME"] = finding.account_ou_name
+                verification = finding.verification
+                poc = verification.poc if verification else None
+                finding_dict["VERIFICATION_OUTCOME"] = (
+                    verification.outcome.value if verification else ""
+                )
+                finding_dict["VERIFICATION_VERIFIER"] = (
+                    verification.verifier if verification else ""
+                )
+                finding_dict["VERIFICATION_RISK"] = (
+                    verification.risk.value if verification else ""
+                )
+                finding_dict["VERIFICATION_REASON"] = (
+                    verification.reason if verification else ""
+                )
+                finding_dict["POC_TOOL"] = poc.tool if poc else ""
+                finding_dict["POC_COMMAND"] = join(poc.command) if poc else ""
+                finding_dict["POC_EXIT_CODE"] = (
+                    poc.exit_code if poc and poc.exit_code is not None else ""
+                )
+                finding_dict["POC_EVIDENCE"] = poc.evidence if poc else ""
+                finding_dict["POC_STDOUT"] = poc.stdout if poc else ""
+                finding_dict["POC_STDERR"] = poc.stderr if poc else ""
+                finding_dict["POC_CLEANUP_STATUS"] = (
+                    verification.cleanup_status if verification else ""
+                )
                 self._data.append(finding_dict)
         except Exception as error:
             logger.error(
