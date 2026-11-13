@@ -38,6 +38,33 @@ IP) and `error`. Findings without an adapter get no `verification` block. A
 summary line `Dynamic verification (<account>): verified=N, ...` is printed to
 stdout after the scan.
 
+## Active adapter (pacu)
+
+One adapter is not read-only: `PacuPrivescAdapter`, for
+`iam_policy_allows_privilege_escalation` and
+`iam_inline_policy_allows_privilege_escalation`. It attaches the flagged
+policy to a disposable test IAM user, runs pacu's `iam__privesc_scan
+--scan-only` against it (detection only — `--scan-only` is what stops pacu
+from attempting the methods it finds, not just reporting them), then detaches
+the policy in a `finally` and re-verifies the detach with a fresh
+`ListAttachedUserPolicies` call. A failed detach is recorded in
+`cleanup_status` and logged, never swallowed.
+
+It is inert unless all four of these are set (on top of the account
+allowlist):
+
+```sh
+export PROWLER_VERIFY_ACTIVE=1
+export PROWLER_VERIFY_ACTIVE_OPERATOR_PROFILE=awsgoat   # can attach/detach policies
+export PROWLER_VERIFY_ACTIVE_TARGET_PROFILE=awsgoat-attacker  # pacu runs as this
+export PROWLER_VERIFY_ACTIVE_TARGET_USER=awsgoat-attacker
+```
+
+Use a disposable test principal for the target, never a real one: during the
+scan it briefly holds whatever the flagged policy grants, which for an
+`Action: "*"` policy is full admin on the account for the few seconds the
+scan takes.
+
 ## Verification image
 
 The opt-in image includes AWS CLI, CloudFox, Nuclei, Pacu, and Stratus Red Team:
@@ -49,8 +76,8 @@ docker build -f Dockerfile.verify \
   -t prowler-satori:verify .
 ```
 
-Only registered adapters can execute tools. Pacu and Stratus are installed for
-future controlled adapters but are not invoked by the current implementation.
-Any future active adapter must require a separate attacker identity, a target
-account allowlist, deterministic cleanup, and a positive cleanup result in the
-PoC record.
+Only registered adapters can execute tools. Pacu is wired as the one active
+adapter above; Stratus is installed for future controlled adapters but is not
+invoked by the current implementation. Any future active adapter must require
+a separate attacker identity, a target account allowlist, deterministic
+cleanup, and a positive cleanup result in the PoC record.

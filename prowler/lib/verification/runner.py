@@ -503,12 +503,225 @@ class Elbv2CleartextHttpAdapter:
         )
 
 
+def _run_privileged(argv: list[str], timeout_seconds: int) -> tuple[int | None, str, str]:
+    """Run a command whose AWS identity must come only from its own
+    ``--profile``/``--import-keys`` argument, never from the scan's ambient
+    credentials (the AWS CLI lets environment variables outrank ``--profile``,
+    which would otherwise make this silently run as the wrong principal).
+    """
+    env = os.environ.copy()
+    for key in (
+        "AWS_ACCESS_KEY_ID",
+        "AWS_SECRET_ACCESS_KEY",
+        "AWS_SESSION_TOKEN",
+        "AWS_PROFILE",
+        "AWS_DEFAULT_PROFILE",
+    ):
+        env.pop(key, None)
+    executable = shutil.which(argv[0])
+    if executable is None:
+        return None, "", f"Required tool is not installed: {argv[0]}"
+    try:
+        result = subprocess.run(
+            [executable, *argv[1:]],
+            capture_output=True,
+            check=False,
+            env=env,
+            shell=False,
+            text=True,
+            timeout=timeout_seconds,
+        )
+        return result.returncode, _redact(result.stdout), _redact(result.stderr)
+    except subprocess.TimeoutExpired as error:
+        partial = error.stdout or ""
+        if isinstance(partial, bytes):
+            partial = partial.decode("utf-8", "replace")
+        return None, _redact(partial), "Verification timed out"
+
+
+class PacuPrivescAdapter:
+    """Confirm a customer-managed/inline policy actually grants privilege
+    escalation, by attaching it to a dedicated, disposable test principal and
+    running pacu's own detection-only scan against that principal.
+
+    This is the fork's only ACTIVE adapter: unlike every other adapter here,
+    it writes to IAM (attach, then detach, a policy on a throwaway test
+    user) instead of only probing from the outside. It never attempts an
+    actual escalation: pacu's ``iam__privesc_scan --scan-only`` only
+    enumerates and reports which methods would work; passing ``--scan-only``
+    skips the branch of that module that would otherwise try them.
+
+    It requires three explicit opt-ins on top of the account allowlist, none
+    set by default, so it is inert unless deliberately wired in:
+      PROWLER_VERIFY_ACTIVE=1
+      PROWLER_VERIFY_ACTIVE_OPERATOR_PROFILE  AWS profile that can attach/detach
+      PROWLER_VERIFY_ACTIVE_TARGET_PROFILE    AWS profile pacu runs as
+      PROWLER_VERIFY_ACTIVE_TARGET_USER       IAM user name behind that profile
+
+    The policy is detached in a ``finally`` no matter how the scan ends, and
+    detachment is independently re-verified with a fresh
+    ListAttachedUserPolicies call before the PoC is considered complete. A
+    failed cleanup is recorded in ``cleanup_status`` and logged, never
+    swallowed, and never silently turns into a passing finding.
+    """
+
+    name = "pacu/iam-privesc-scan"
+    risk = VerificationRisk.ACTIVE
+    check_ids = {
+        "iam_policy_allows_privilege_escalation",
+        "iam_inline_policy_allows_privilege_escalation",
+    }
+
+    def supports(self, finding: Finding) -> bool:
+        if finding.check_id not in self.check_ids:
+            return False
+        if os.getenv("PROWLER_VERIFY_ACTIVE") not in ("1", "true", "yes"):
+            return False
+        return bool(
+            os.getenv("PROWLER_VERIFY_ACTIVE_OPERATOR_PROFILE")
+            and os.getenv("PROWLER_VERIFY_ACTIVE_TARGET_PROFILE")
+            and os.getenv("PROWLER_VERIFY_ACTIVE_TARGET_USER")
+        )
+
+    @staticmethod
+    def _attached_policies(
+        operator_profile: str, target_user: str, timeout_seconds: int
+    ) -> tuple[set[str] | None, str]:
+        argv = [
+            "aws", "iam", "list-attached-user-policies",
+            "--user-name", target_user, "--profile", operator_profile,
+            "--output", "json",
+        ]
+        exit_code, stdout, stderr = _run_privileged(argv, timeout_seconds)
+        if exit_code != 0:
+            return None, stderr
+        import json as _json
+
+        try:
+            policies = _json.loads(stdout).get("AttachedPolicies", [])
+        except ValueError:
+            return None, "Could not parse list-attached-user-policies output"
+        return {policy["PolicyArn"] for policy in policies}, ""
+
+    def verify(self, finding: Finding, context: VerificationContext) -> Verification:
+        policy_arn = finding.resource_uid
+        if not policy_arn:
+            return _result(
+                self, VerificationOutcome.SKIPPED,
+                reason="This finding has no policy ARN to attach.",
+            )
+
+        operator_profile = os.environ["PROWLER_VERIFY_ACTIVE_OPERATOR_PROFILE"]
+        target_profile = os.environ["PROWLER_VERIFY_ACTIVE_TARGET_PROFILE"]
+        target_user = os.environ["PROWLER_VERIFY_ACTIVE_TARGET_USER"]
+        timeout = max(context.timeout_seconds, 180)
+        region = finding.region or "us-east-1"
+        pacu_session = f"prowler-verify-{context.account_id}"
+        commands: list[list[str]] = []
+
+        baseline, error = self._attached_policies(operator_profile, target_user, timeout)
+        if baseline is None:
+            return _result(
+                self, VerificationOutcome.ERROR,
+                reason=f"Could not read {target_user}'s current policies: {error}",
+            )
+        if policy_arn in baseline:
+            return _result(
+                self, VerificationOutcome.SKIPPED,
+                reason=f"{policy_arn} is already attached to {target_user}; "
+                "refusing to touch pre-existing state.",
+            )
+
+        attach_argv = [
+            "aws", "iam", "attach-user-policy", "--user-name", target_user,
+            "--policy-arn", policy_arn, "--profile", operator_profile,
+        ]
+        commands.append(attach_argv)
+        attach_exit, _, attach_stderr = _run_privileged(attach_argv, timeout)
+        if attach_exit != 0:
+            return _result(
+                self, VerificationOutcome.ERROR,
+                reason=f"Could not attach {policy_arn} to {target_user}: {attach_stderr}",
+            )
+
+        pacu_exit, pacu_stdout, pacu_stderr = None, "", ""
+        try:
+            for argv in (
+                ["pacu", "--new-session", pacu_session],
+                ["pacu", "--session", pacu_session, "--import-keys", target_profile],
+                ["pacu", "--session", pacu_session, "--set-regions", region],
+                ["pacu", "--session", pacu_session, "--exec", "--module-name", "iam__enum_permissions"],
+            ):
+                commands.append(argv)
+                _run_privileged(argv, timeout)
+            scan_argv = [
+                "pacu", "--session", pacu_session, "--exec", "--module-name",
+                "iam__privesc_scan", "--module-args=--scan-only",
+            ]
+            commands.append(scan_argv)
+            pacu_exit, pacu_stdout, pacu_stderr = _run_privileged(scan_argv, timeout)
+        finally:
+            detach_argv = [
+                "aws", "iam", "detach-user-policy", "--user-name", target_user,
+                "--policy-arn", policy_arn, "--profile", operator_profile,
+            ]
+            commands.append(detach_argv)
+            detach_exit, _, detach_stderr = _run_privileged(detach_argv, timeout)
+
+        after, after_error = self._attached_policies(operator_profile, target_user, timeout)
+        cleanup_ok = detach_exit == 0 and after is not None and policy_arn not in after
+        cleanup_status = (
+            "verified"
+            if cleanup_ok
+            else f"FAILED to detach {policy_arn} from {target_user}: "
+            f"{detach_stderr or after_error or 'still attached after detach'}"
+        )
+        if not cleanup_ok:
+            logger.error(
+                "pacu privesc adapter cleanup FAILED for %s on %s: %s",
+                policy_arn, target_user, cleanup_status,
+            )
+
+        confirmed = re.findall(r"CONFIRMED: (.+)", pacu_stdout)
+        potential = re.findall(r"POTENTIAL: (.+)", pacu_stdout)
+        poc = PoC(
+            tool="pacu",
+            command=[token for argv in commands for token in argv],
+            exit_code=pacu_exit,
+            stdout=pacu_stdout,
+            stderr=pacu_stderr,
+            evidence=(
+                f"With {policy_arn} attached to the disposable test principal "
+                f"{target_user}, pacu's iam__privesc_scan (--scan-only: detection "
+                "only, no method was attempted) found confirmed methods: "
+                f"{', '.join(confirmed) or 'none'}; potential: "
+                f"{', '.join(potential) or 'none'}. The policy was detached "
+                f"immediately after; cleanup {cleanup_status}."
+            ),
+        )
+        if confirmed or potential:
+            outcome = VerificationOutcome.VERIFIED
+        elif pacu_exit == 0:
+            outcome = VerificationOutcome.NOT_REPRODUCED
+        else:
+            outcome = VerificationOutcome.ERROR
+        return Verification(
+            outcome=outcome,
+            verifier=self.name,
+            risk=self.risk,
+            reason="" if outcome != VerificationOutcome.ERROR else (pacu_stderr or "pacu did not complete"),
+            poc=poc,
+            cleanup_status=cleanup_status,
+        )
+
+
 DEFAULT_ADAPTERS: tuple[VerificationAdapter, ...] = (
     S3AnonymousListAdapter(),
     S3AnonymousReadAdapter(),
     NetworkPortExposureAdapter(),
     ApiGatewayUnauthenticatedAdapter(),
     Elbv2CleartextHttpAdapter(),
+    PacuPrivescAdapter(),
 )
 
 
@@ -682,7 +895,6 @@ class CloudFoxInstanceRoleEnricher:
         return _cloudfox_instances_cache
 
     def enrich(self, finding, verification, context):
-        url_or_ip = _url_in_poc(verification) or ""
         ips = NetworkPortExposureAdapter._public_ips(finding)
         probed = re.findall(r"\b\d{1,3}(?:\.\d{1,3}){3}\b", " ".join(verification.poc.command)) if verification.poc else []
         candidates = probed or ips

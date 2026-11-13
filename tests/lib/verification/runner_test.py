@@ -6,6 +6,7 @@ import pytest
 from prowler.lib.verification.models import VerificationOutcome
 from prowler.lib.verification.runner import (
     CloudFoxInstanceRoleEnricher,
+    PacuPrivescAdapter,
     _run_command,
     verify_findings,
 )
@@ -447,3 +448,194 @@ def test_cloudfox_uses_the_external_ip_field_name(monkeypatch):
         result = verify_findings([finding], account_id="123456789012")[0]
 
     assert result.verification.enrichment[0].findings[0]["role"] == "AWS_GOAT_ROLE"
+
+
+def _active_env(monkeypatch):
+    monkeypatch.setenv("PROWLER_VERIFY_ACTIVE", "1")
+    monkeypatch.setenv("PROWLER_VERIFY_ACTIVE_OPERATOR_PROFILE", "awsgoat-deployer")
+    monkeypatch.setenv("PROWLER_VERIFY_ACTIVE_TARGET_PROFILE", "awsgoat-attacker")
+    monkeypatch.setenv("PROWLER_VERIFY_ACTIVE_TARGET_USER", "awsgoat-attacker")
+
+
+def test_pacu_adapter_is_inert_without_full_opt_in(monkeypatch):
+    monkeypatch.setenv("PROWLER_VERIFY_ALLOWED_ACCOUNT_IDS", "123456789012")
+    monkeypatch.setenv("PROWLER_VERIFY_ENRICH", "0")
+    monkeypatch.delenv("PROWLER_VERIFY_ACTIVE", raising=False)
+    finding = _fail(
+        "iam_policy_allows_privilege_escalation",
+        {},
+        resource_uid="arn:aws:iam::123456789012:policy/some-policy",
+    )
+
+    assert PacuPrivescAdapter().supports(finding) is False
+
+    with patch("prowler.lib.verification.runner._run_privileged") as privileged:
+        result = verify_findings([finding], account_id="123456789012")[0]
+
+    assert result.verification is None
+    privileged.assert_not_called()
+
+
+def test_pacu_adapter_skips_when_policy_already_attached(monkeypatch):
+    monkeypatch.setenv("PROWLER_VERIFY_ALLOWED_ACCOUNT_IDS", "123456789012")
+    monkeypatch.setenv("PROWLER_VERIFY_ENRICH", "0")
+    _active_env(monkeypatch)
+    policy_arn = "arn:aws:iam::123456789012:policy/ec2DeployerAdmin-policy"
+    finding = _fail(
+        "iam_policy_allows_privilege_escalation", {}, resource_uid=policy_arn
+    )
+
+    with patch(
+        "prowler.lib.verification.runner._run_privileged",
+        return_value=(0, f'{{"AttachedPolicies": [{{"PolicyArn": "{policy_arn}"}}]}}', ""),
+    ) as privileged:
+        result = verify_findings([finding], account_id="123456789012")[0]
+
+    assert result.verification.outcome == VerificationOutcome.SKIPPED
+    assert "already attached" in result.verification.reason
+    privileged.assert_called_once()  # only the baseline read; never attach/detach
+
+
+def test_pacu_adapter_verified_and_cleaned_up(monkeypatch):
+    monkeypatch.setenv("PROWLER_VERIFY_ALLOWED_ACCOUNT_IDS", "123456789012")
+    monkeypatch.setenv("PROWLER_VERIFY_ENRICH", "0")
+    _active_env(monkeypatch)
+    policy_arn = "arn:aws:iam::123456789012:policy/ec2DeployerAdmin-policy"
+    finding = _fail(
+        "iam_policy_allows_privilege_escalation", {}, resource_uid=policy_arn
+    )
+    calls = []
+
+    def fake_run(argv, timeout):
+        calls.append(argv)
+        if argv[:3] == ["aws", "iam", "list-attached-user-policies"]:
+            return (0, '{"AttachedPolicies": []}', "")
+        if argv[:3] == ["aws", "iam", "attach-user-policy"]:
+            return (0, "", "")
+        if argv[:3] == ["aws", "iam", "detach-user-policy"]:
+            return (0, "", "")
+        if "iam__privesc_scan" in argv:
+            return (0, "  CONFIRMED: CreateNewPolicyVersion\n", "")
+        return (0, "", "")  # new-session / import-keys / set-regions / enum_permissions
+
+    with patch(
+        "prowler.lib.verification.runner._run_privileged", side_effect=fake_run
+    ):
+        result = verify_findings([finding], account_id="123456789012")[0]
+
+    assert result.verification.outcome == VerificationOutcome.VERIFIED
+    assert result.verification.cleanup_status == "verified"
+    assert "CreateNewPolicyVersion" in result.verification.poc.evidence
+    # attach must happen before detach, and both must be present
+    kinds = [c[2] for c in calls if c[:2] == ["aws", "iam"]]
+    assert kinds.index("attach-user-policy") < kinds.index("detach-user-policy")
+
+
+def test_pacu_adapter_records_cleanup_failure_without_swallowing_it(monkeypatch, caplog):
+    monkeypatch.setenv("PROWLER_VERIFY_ALLOWED_ACCOUNT_IDS", "123456789012")
+    monkeypatch.setenv("PROWLER_VERIFY_ENRICH", "0")
+    _active_env(monkeypatch)
+    policy_arn = "arn:aws:iam::123456789012:policy/ec2DeployerAdmin-policy"
+    finding = _fail(
+        "iam_policy_allows_privilege_escalation", {}, resource_uid=policy_arn
+    )
+
+    def fake_run(argv, timeout):
+        if argv[:3] == ["aws", "iam", "list-attached-user-policies"]:
+            return (0, '{"AttachedPolicies": []}', "")
+        if argv[:3] == ["aws", "iam", "attach-user-policy"]:
+            return (0, "", "")
+        if argv[:3] == ["aws", "iam", "detach-user-policy"]:
+            return (1, "", "AccessDenied")  # cleanup fails
+        if "iam__privesc_scan" in argv:
+            return (0, "  None found\n", "")
+        return (0, "", "")
+
+    with patch(
+        "prowler.lib.verification.runner._run_privileged", side_effect=fake_run
+    ):
+        result = verify_findings([finding], account_id="123456789012")[0]
+
+    assert result.verification.cleanup_status.startswith("FAILED")
+    assert any("cleanup FAILED" in record.message for record in caplog.records)
+
+
+def test_pacu_adapter_detaches_even_if_the_scan_step_raises(monkeypatch):
+    monkeypatch.setenv("PROWLER_VERIFY_ALLOWED_ACCOUNT_IDS", "123456789012")
+    monkeypatch.setenv("PROWLER_VERIFY_ENRICH", "0")
+    _active_env(monkeypatch)
+    policy_arn = "arn:aws:iam::123456789012:policy/ec2DeployerAdmin-policy"
+    finding = _fail(
+        "iam_policy_allows_privilege_escalation", {}, resource_uid=policy_arn
+    )
+    detach_calls = []
+
+    def fake_run(argv, timeout):
+        if argv[:3] == ["aws", "iam", "list-attached-user-policies"]:
+            return (0, '{"AttachedPolicies": []}', "")
+        if argv[:3] == ["aws", "iam", "attach-user-policy"]:
+            return (0, "", "")
+        if argv[:3] == ["aws", "iam", "detach-user-policy"]:
+            detach_calls.append(argv)
+            return (0, "", "")
+        if "iam__privesc_scan" in argv:
+            raise RuntimeError("pacu crashed")
+        return (0, "", "")
+
+    with patch(
+        "prowler.lib.verification.runner._run_privileged", side_effect=fake_run
+    ):
+        result = verify_findings([finding], account_id="123456789012")[0]
+
+    assert len(detach_calls) == 1  # cleanup still ran despite the crash
+    assert result.verification.outcome == VerificationOutcome.ERROR
+
+
+def test_pacu_adapter_never_sends_scan_only_minus_flag(monkeypatch):
+    """--scan-only must always be present: it is what stops pacu from
+    attempting the escalation methods it finds, not just reporting them."""
+    monkeypatch.setenv("PROWLER_VERIFY_ALLOWED_ACCOUNT_IDS", "123456789012")
+    monkeypatch.setenv("PROWLER_VERIFY_ENRICH", "0")
+    _active_env(monkeypatch)
+    policy_arn = "arn:aws:iam::123456789012:policy/ec2DeployerAdmin-policy"
+    finding = _fail(
+        "iam_policy_allows_privilege_escalation", {}, resource_uid=policy_arn
+    )
+    scan_argvs = []
+
+    def fake_run(argv, timeout):
+        if argv[:3] == ["aws", "iam", "list-attached-user-policies"]:
+            return (0, '{"AttachedPolicies": []}', "")
+        if "iam__privesc_scan" in argv:
+            scan_argvs.append(argv)
+            return (0, "  None found\n", "")
+        return (0, "", "")
+
+    with patch(
+        "prowler.lib.verification.runner._run_privileged", side_effect=fake_run
+    ):
+        verify_findings([finding], account_id="123456789012")
+
+    assert scan_argvs and "--module-args=--scan-only" in scan_argvs[0]
+
+
+def test_pacu_adapter_isolates_ambient_aws_credentials(monkeypatch):
+    """The operator's --profile must win; ambient scan credentials must not
+    leak into the attach/detach/pacu subprocess environment."""
+    monkeypatch.setenv("AWS_ACCESS_KEY_ID", "AKIA0000000000000000")
+    monkeypatch.setenv("AWS_SECRET_ACCESS_KEY", "secret")
+
+    with (
+        patch("prowler.lib.verification.runner.shutil.which", return_value="/aws"),
+        patch(
+            "prowler.lib.verification.runner.subprocess.run",
+            return_value=CompletedProcess(["/aws"], 0, "{}", ""),
+        ) as run,
+    ):
+        from prowler.lib.verification.runner import _run_privileged
+
+        _run_privileged(["aws", "iam", "list-attached-user-policies"], 10)
+
+    environment = run.call_args.kwargs["env"]
+    assert "AWS_ACCESS_KEY_ID" not in environment
+    assert "AWS_SECRET_ACCESS_KEY" not in environment
