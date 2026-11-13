@@ -503,11 +503,23 @@ class Elbv2CleartextHttpAdapter:
         )
 
 
-def _run_privileged(argv: list[str], timeout_seconds: int) -> tuple[int | None, str, str]:
+def _run_privileged(
+    argv: list[str],
+    timeout_seconds: int,
+    *,
+    profile: str | None = None,
+    region: str | None = None,
+) -> tuple[int | None, str, str]:
     """Run a command whose AWS identity must come only from its own
     ``--profile``/``--import-keys`` argument, never from the scan's ambient
     credentials (the AWS CLI lets environment variables outrank ``--profile``,
     which would otherwise make this silently run as the wrong principal).
+
+    Pass ``profile`` for a tool with no ``--profile`` flag of its own (e.g.
+    stratus), which only reads the ambient AWS SDK credential chain; it is
+    set as ``AWS_PROFILE`` after the ambient credentials are cleared. Pass
+    ``region`` likewise for a tool that, unlike the AWS CLI, will not fall
+    back to a profile's configured region and simply fails without one.
     """
     env = os.environ.copy()
     for key in (
@@ -518,6 +530,10 @@ def _run_privileged(argv: list[str], timeout_seconds: int) -> tuple[int | None, 
         "AWS_DEFAULT_PROFILE",
     ):
         env.pop(key, None)
+    if profile:
+        env["AWS_PROFILE"] = profile
+    if region:
+        env["AWS_REGION"] = region
     executable = shutil.which(argv[0])
     if executable is None:
         return None, "", f"Required tool is not installed: {argv[0]}"
@@ -927,9 +943,159 @@ class CloudFoxInstanceRoleEnricher:
         return None
 
 
+STRATUS_S3_TECHNIQUE = "aws.exfiltration.s3-backdoor-bucket-policy"
+_stratus_s3_result: dict | None = None
+_stratus_s3_unavailable = False
+
+
+def _run_stratus_s3_exfiltration(
+    operator_profile: str, region: str, timeout_seconds: int
+) -> dict | None:
+    """Detonate a real S3-exfiltration technique on a disposable bucket of
+    its own (never the finding's actual bucket), then guarantee cleanup by
+    verifying against AWS directly -- never by trusting stratus's own local
+    state. That state lives under ~/.stratus-red-team and does not survive
+    a crash or a different container, so it cannot be the source of truth
+    for whether the bucket was actually removed.
+    """
+
+    def run(argv: list[str]) -> tuple[int | None, str, str]:
+        return _run_privileged(argv, timeout_seconds, profile=operator_profile, region=region)
+
+    commands = [["stratus", "warmup", STRATUS_S3_TECHNIQUE]]
+    warmup_exit, warmup_out, warmup_err = run(commands[0])
+    if warmup_exit != 0:
+        logger.error("stratus warmup failed: %s", warmup_err or warmup_out)
+        return None
+
+    detonate_argv = ["stratus", "detonate", STRATUS_S3_TECHNIQUE, "--force"]
+    commands.append(detonate_argv)
+    detonate_exit, detonate_out, detonate_err = run(detonate_argv)
+    match = re.search(r"Backdooring bucket policy of (\S+)", detonate_out)
+    bucket = match.group(1) if match else None
+    if not bucket:
+        logger.error(
+            "stratus detonate did not report a bucket name: %s",
+            detonate_err or detonate_out,
+        )
+
+    policy = ""
+    if bucket:
+        policy_argv = [
+            "aws", "s3api", "get-bucket-policy", "--bucket", bucket,
+            "--query", "Policy", "--output", "text",
+        ]
+        commands.append(policy_argv)
+        _, policy, _ = run(policy_argv)
+        policy = policy.strip()
+
+    cleanup_argv = ["stratus", "cleanup", STRATUS_S3_TECHNIQUE, "--force"]
+    commands.append(cleanup_argv)
+    run(cleanup_argv)
+
+    cleanup_ok = True
+    if bucket:
+        exists_argv = ["aws", "s3api", "head-bucket", "--bucket", bucket]
+        commands.append(exists_argv)
+        still_exists, _, _ = run(exists_argv)
+        if still_exists == 0:
+            # stratus's own cleanup did not remove it (its local state was
+            # never warmed, or was lost) -- finish the job ourselves.
+            logger.error(
+                "stratus cleanup left %s behind; deleting it directly", bucket
+            )
+            for forced_argv in (
+                ["aws", "s3api", "delete-bucket-policy", "--bucket", bucket],
+                ["aws", "s3", "rm", f"s3://{bucket}", "--recursive"],
+            ):
+                commands.append(forced_argv)
+                run(forced_argv)
+            delete_argv = ["aws", "s3api", "delete-bucket", "--bucket", bucket]
+            commands.append(delete_argv)
+            delete_exit, _, delete_err = run(delete_argv)
+            cleanup_ok = delete_exit == 0
+            if not cleanup_ok:
+                logger.error(
+                    "stratus enricher could NOT remove leftover bucket %s: %s",
+                    bucket, delete_err,
+                )
+
+    return {
+        "technique": STRATUS_S3_TECHNIQUE,
+        "bucket": bucket,
+        "backdoor_policy": policy,
+        "cleanup_ok": cleanup_ok,
+        "command": [token for argv in commands for token in argv],
+    }
+
+
+class StratusS3ExfiltrationEnricher:
+    """Attach real attacker tradecraft (Stratus Red Team) to an already
+    confirmed public-bucket finding, run on a disposable bucket of its own.
+
+    Inert unless PROWLER_VERIFY_ACTIVE=1, PROWLER_VERIFY_ACTIVE_STRATUS=1
+    and PROWLER_VERIFY_ACTIVE_OPERATOR_PROFILE are all set -- a dedicated
+    opt-in separate from the pacu adapter's, since this creates and destroys
+    real infrastructure rather than toggling one policy attachment. Runs at
+    most once per process (the technique's value does not grow by repeating
+    it per bucket); the same result is attached to every qualifying finding.
+    """
+
+    check_ids = {"s3_bucket_public_list_acl", "s3_bucket_public_access"}
+
+    def applies_to(self, finding: Finding, verification: Verification) -> bool:
+        if finding.check_id not in self.check_ids:
+            return False
+        return (
+            os.getenv("PROWLER_VERIFY_ACTIVE") in ("1", "true", "yes")
+            and os.getenv("PROWLER_VERIFY_ACTIVE_STRATUS") in ("1", "true", "yes")
+            and bool(os.getenv("PROWLER_VERIFY_ACTIVE_OPERATOR_PROFILE"))
+        )
+
+    def enrich(self, finding, verification, context):
+        global _stratus_s3_result, _stratus_s3_unavailable
+        if _stratus_s3_result is None and not _stratus_s3_unavailable:
+            if shutil.which("stratus") is None:
+                _stratus_s3_unavailable = True
+            else:
+                operator_profile = os.environ["PROWLER_VERIFY_ACTIVE_OPERATOR_PROFILE"]
+                region = finding.region or "us-east-1"
+                _stratus_s3_result = _run_stratus_s3_exfiltration(
+                    operator_profile, region, max(context.timeout_seconds, 180)
+                )
+                if _stratus_s3_result is None:
+                    _stratus_s3_unavailable = True
+        if not _stratus_s3_result:
+            return None
+        result = _stratus_s3_result
+        summary = (
+            f"stratus detonated {result['technique']} on its own disposable "
+            f"bucket ({result['bucket']}), backdooring its policy to grant an "
+            "external AWS account read access -- the same move a real "
+            "attacker makes once a bucket like this one is public. Cleanup "
+            f"{'verified' if result['cleanup_ok'] else 'FAILED, see logs'}."
+        )
+        return Enrichment(
+            tool="stratus",
+            risk=VerificationRisk.ACTIVE,
+            command=result["command"],
+            summary=summary,
+            findings=[
+                {
+                    "technique": result["technique"],
+                    "bucket": result["bucket"],
+                    "backdoor_policy_added": bool(result["backdoor_policy"]),
+                    "cleanup_ok": result["cleanup_ok"],
+                }
+            ],
+            cleanup_status="verified" if result["cleanup_ok"] else "FAILED: see logs",
+        )
+
+
 DEFAULT_ENRICHERS: tuple[Enricher, ...] = (
     NucleiWebEnricher(),
     CloudFoxInstanceRoleEnricher(),
+    StratusS3ExfiltrationEnricher(),
 )
 
 
