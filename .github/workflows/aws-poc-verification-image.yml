@@ -1,0 +1,68 @@
+name: 'AWS PoC Verification: Build and Push Image'
+# Builds the opt-in verification image (Dockerfile + Dockerfile.verify, which
+# adds aws-cli, cloudfox, nuclei, pacu and stratus on top of the regular
+# Prowler image) and publishes it to this fork's own GHCR, never upstream.
+# Not part of prowler-cloud/prowler's release process.
+
+on:
+  push:
+    branches:
+      - 'feature/aws-poc-verification'
+    paths:
+      - 'Dockerfile'
+      - 'Dockerfile.verify'
+      - 'prowler/**'
+      - '.github/workflows/aws-poc-verification-image.yml'
+  workflow_dispatch: {}
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  IMAGE: ghcr.io/satoridev01/prowler
+
+permissions: {}
+
+jobs:
+  build-and-push:
+    if: github.repository == 'satoridev01/prowler'
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      contents: read
+      packages: write
+
+    steps:
+      - name: Harden the runner (Audit all outbound calls)
+        uses: step-security/harden-runner@dc2769abcc0fcfbadfc1df54081c1608579ef6b2 # v2.22.2
+        with:
+          egress-policy: audit
+
+      - name: Checkout repository
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
+        with:
+          persist-credentials: false
+
+      - name: Log in to GHCR
+        uses: docker/login-action@81c6f93d4bc991e510b342a00b419b3bb4efc5c6 # v4.7.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build the base image
+        run: docker build -t prowler-satori:local .
+
+      - name: Build the verification image
+        run: |
+          docker build -f Dockerfile.verify \
+            --build-arg PROWLER_BASE_IMAGE=prowler-satori:local \
+            -t "${IMAGE}:aws-poc-verification" \
+            -t "${IMAGE}:aws-poc-verification-${GITHUB_SHA::7}" \
+            .
+
+      - name: Push the verification image
+        run: |
+          docker push "${IMAGE}:aws-poc-verification"
+          docker push "${IMAGE}:aws-poc-verification-${GITHUB_SHA::7}"
