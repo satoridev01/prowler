@@ -1,5 +1,5 @@
 from subprocess import CompletedProcess
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 import pytest
 
@@ -83,3 +83,195 @@ def test_anonymous_aws_command_cannot_inherit_credentials(monkeypatch):
     assert "AWS_SHARED_CREDENTIALS_FILE" not in environment
     assert environment["AWS_EC2_METADATA_DISABLED"] == "true"
     assert run.call_args.kwargs["shell"] is False
+
+
+def _fail(check_id, metadata, **kwargs):
+    kwargs.setdefault("service_name", check_id.split("_")[0])
+    finding = generate_finding_output(status="FAIL", check_id=check_id, **kwargs)
+    finding.resource_metadata = metadata
+    return finding
+
+
+def test_ssh_exposure_probes_public_ip(monkeypatch):
+    monkeypatch.setenv("PROWLER_VERIFY_ALLOWED_ACCOUNT_IDS", "123456789012")
+    finding = _fail(
+        "ec2_instance_port_ssh_exposed_to_internet", {"public_ip": "203.0.113.10"}
+    )
+
+    with patch(
+        "prowler.lib.verification.runner._run_command",
+        return_value=(0, "connected to 203.0.113.10:22\nbanner: SSH-2.0-OpenSSH", ""),
+    ) as command:
+        result = verify_findings([finding], account_id="123456789012")[0]
+
+    assert result.verification.outcome == VerificationOutcome.VERIFIED
+    assert result.verification.poc.command[-2:] == ["203.0.113.10", "22"]
+    assert command.call_args.kwargs["anonymous_aws"] is True
+
+
+def test_security_group_ports_come_from_check_name(monkeypatch):
+    monkeypatch.setenv("PROWLER_VERIFY_ALLOWED_ACCOUNT_IDS", "123456789012")
+    finding = _fail(
+        "ec2_securitygroup_allow_ingress_from_internet_to_tcp_port_mongodb_27017_27018",
+        {"network_interfaces": [{"public_ip_addresses": ["203.0.113.11"]}]},
+    )
+
+    with patch(
+        "prowler.lib.verification.runner._run_command",
+        return_value=(1, "connect failed", ""),
+    ) as command:
+        result = verify_findings([finding], account_id="123456789012")[0]
+
+    assert result.verification.outcome == VerificationOutcome.NOT_REPRODUCED
+    assert [call.args[0][-1] for call in command.call_args_list] == ["27017", "27018"]
+
+
+def test_port_exposure_without_public_ip_is_skipped(monkeypatch):
+    monkeypatch.setenv("PROWLER_VERIFY_ALLOWED_ACCOUNT_IDS", "123456789012")
+    finding = _fail("ec2_instance_port_ssh_exposed_to_internet", {})
+
+    with patch("prowler.lib.verification.runner._run_command") as command:
+        result = verify_findings([finding], account_id="123456789012")[0]
+
+    assert result.verification.outcome == VerificationOutcome.SKIPPED
+    command.assert_not_called()
+
+
+def test_api_gateway_only_calls_unauthenticated_get(monkeypatch):
+    monkeypatch.setenv("PROWLER_VERIFY_ALLOWED_ACCOUNT_IDS", "123456789012")
+    finding = _fail(
+        "apigateway_restapi_authorizers_enabled",
+        {
+            "id": "abc123",
+            "region": "us-east-1",
+            "public_endpoint": True,
+            "stages": [{"name": "v1"}],
+            "resources": [
+                {"path": "/login", "resource_methods": {"POST": "NONE"}},
+                {"path": "/users/{id}", "resource_methods": {"GET": "NONE"}},
+                {"path": "/private", "resource_methods": {"GET": "AWS_IAM"}},
+                {"path": "/dump", "resource_methods": {"GET": "NONE"}},
+            ],
+        },
+    )
+
+    with patch(
+        "prowler.lib.verification.runner._run_command",
+        return_value=(0, "HTTP 200\nGET ...", ""),
+    ) as command:
+        result = verify_findings([finding], account_id="123456789012")[0]
+
+    assert result.verification.outcome == VerificationOutcome.VERIFIED
+    command.assert_called_once()
+    assert (
+        command.call_args.args[0][-1]
+        == "https://abc123.execute-api.us-east-1.amazonaws.com/v1/dump"
+    )
+
+
+def test_api_gateway_without_safe_method_is_skipped(monkeypatch):
+    monkeypatch.setenv("PROWLER_VERIFY_ALLOWED_ACCOUNT_IDS", "123456789012")
+    finding = _fail(
+        "apigateway_restapi_public",
+        {
+            "id": "abc123",
+            "stages": [{"name": "v1"}],
+            "resources": [{"path": "/login", "resource_methods": {"POST": "NONE"}}],
+        },
+    )
+
+    with patch("prowler.lib.verification.runner._run_command") as command:
+        result = verify_findings([finding], account_id="123456789012")[0]
+
+    assert result.verification.outcome == VerificationOutcome.SKIPPED
+    command.assert_not_called()
+
+
+def test_api_gateway_rejection_is_not_reproduced(monkeypatch):
+    monkeypatch.setenv("PROWLER_VERIFY_ALLOWED_ACCOUNT_IDS", "123456789012")
+    finding = _fail(
+        "apigateway_restapi_public",
+        {
+            "id": "abc123",
+            "stages": [{"name": "v1"}],
+            "resources": [{"path": "/", "resource_methods": {"GET": "NONE"}}],
+        },
+    )
+
+    with patch(
+        "prowler.lib.verification.runner._run_command",
+        return_value=(0, "HTTP 403\n", ""),
+    ):
+        result = verify_findings([finding], account_id="123456789012")[0]
+
+    assert result.verification.outcome == VerificationOutcome.NOT_REPRODUCED
+
+
+def test_elbv2_cleartext_listener(monkeypatch):
+    monkeypatch.setenv("PROWLER_VERIFY_ALLOWED_ACCOUNT_IDS", "123456789012")
+    listeners = {
+        "l1": {"port": 80, "protocol": "HTTP", "rules": [{"actions": [{"Type": "forward"}]}]},
+        "l2": {"port": 8080, "protocol": "HTTP", "rules": [{"actions": [{"Type": "redirect"}]}]},
+    }
+    finding = _fail(
+        "elbv2_ssl_listeners",
+        {"dns": "alb.example.com", "scheme": "internet-facing", "listeners": listeners},
+    )
+
+    with patch(
+        "prowler.lib.verification.runner._run_command",
+        return_value=(0, "HTTP 200\n", ""),
+    ) as command:
+        result = verify_findings([finding], account_id="123456789012")[0]
+
+    assert result.verification.outcome == VerificationOutcome.VERIFIED
+    command.assert_called_once()
+    assert command.call_args.args[0][-1] == "http://alb.example.com:80/"
+
+
+def test_s3_public_read_uses_unsigned_head_object(monkeypatch):
+    monkeypatch.setenv("PROWLER_VERIFY_ALLOWED_ACCOUNT_IDS", "123456789012")
+    finding = _fail(
+        "s3_bucket_public_access",
+        {"region": "us-east-1"},
+        service_name="s3",
+        resource_name="public-bucket",
+    )
+
+    with patch(
+        "prowler.lib.verification.runner._run_command",
+        side_effect=[(0, "index.html\n", ""), (0, "{}", "")],
+    ) as command:
+        result = verify_findings([finding], account_id="123456789012")[0]
+
+    assert result.verification.outcome == VerificationOutcome.VERIFIED
+    head_object = command.call_args_list[1].args[0]
+    assert head_object[:3] == ["aws", "s3api", "head-object"]
+    assert "--no-sign-request" in head_object and "index.html" in head_object
+    assert all(call.kwargs["anonymous_aws"] for call in command.call_args_list)
+
+
+def test_s3_public_read_falls_back_to_scan_credentials_for_listing(monkeypatch):
+    monkeypatch.setenv("PROWLER_VERIFY_ALLOWED_ACCOUNT_IDS", "123456789012")
+    finding = _fail(
+        "s3_bucket_public_access",
+        {"region": "us-east-1"},
+        service_name="s3",
+        resource_name="read-only-bucket",
+    )
+    session = MagicMock()
+    session.client.return_value.list_objects_v2.return_value = {
+        "Contents": [{"Key": "build/app.js"}]
+    }
+
+    with patch(
+        "prowler.lib.verification.runner._run_command",
+        side_effect=[(254, "", "AccessDenied"), (0, "{}", "")],
+    ):
+        result = verify_findings(
+            [finding], account_id="123456789012", session=session
+        )[0]
+
+    assert result.verification.outcome == VerificationOutcome.VERIFIED
+    assert "build/app.js" in result.verification.poc.command
+    assert "read-only credentials" in result.verification.poc.evidence

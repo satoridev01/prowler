@@ -643,6 +643,9 @@ def prowler():
                 finding_outputs,
                 account_id=global_provider.identity.account,
                 profile=global_provider.identity.profile,
+                session=getattr(
+                    getattr(global_provider, "session", None), "current_session", None
+                ),
             )
         except ValueError as error:
             logger.critical(error)
