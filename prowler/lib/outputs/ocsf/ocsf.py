@@ -190,7 +190,21 @@ class OCSF(Output):
                             {
                                 "verification": finding.verification.dict(
                                     exclude_none=True
-                                )
+                                ),
+                                # "outcome" is already the cross-tool name (jsspector's
+                                # own --verify uses the same one); no separate
+                                # "exploitation" field. "poc" is aliased to the top
+                                # level, alongside "verification", matching jsspector's
+                                # flatter shape where poc sits next to outcome.
+                                **(
+                                    {
+                                        "poc": finding.verification.poc.dict(
+                                            exclude_none=True
+                                        )
+                                    }
+                                    if finding.verification.poc
+                                    else {}
+                                ),
                             }
                             if finding.verification
                             else {}

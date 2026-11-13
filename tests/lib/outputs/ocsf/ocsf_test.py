@@ -164,6 +164,45 @@ class TestOCSF:
         assert output.unmapped["verification"]["outcome"] == "verified"
         assert output.unmapped["verification"]["poc"]["tool"] == "aws-cli"
 
+    def test_transform_includes_top_level_poc_alias(self):
+        """jsspector's own --verify keeps `outcome` as the cross-tool name (no
+        separate "exploitation" field) and puts `poc` next to it, not nested
+        under another wrapper. This mirrors that: `poc` is aliased to the top
+        level, alongside the richer "verification" block it is copied from."""
+        verification = Verification(
+            outcome=VerificationOutcome.VERIFIED,
+            verifier="aws-cli/s3-anonymous-head-bucket",
+            risk=VerificationRisk.PASSIVE,
+            poc=PoC(tool="aws-cli", command=["aws", "s3api", "head-bucket"]),
+        )
+        output = OCSF(
+            [generate_finding_output(status="FAIL", verification=verification)]
+        ).data[0]
+
+        assert output.unmapped["verification"]["outcome"] == "verified"
+        assert output.unmapped["poc"]["tool"] == "aws-cli"
+        assert "exploitation" not in output.unmapped
+
+    def test_no_poc_alias_when_verification_has_no_poc(self):
+        verification = Verification(
+            outcome=VerificationOutcome.SKIPPED,
+            verifier="aws-cli/s3-anonymous-head-bucket",
+            risk=VerificationRisk.PASSIVE,
+            reason="No public IP is attached to this resource.",
+        )
+        output = OCSF(
+            [generate_finding_output(status="FAIL", verification=verification)]
+        ).data[0]
+
+        assert output.unmapped["verification"]["outcome"] == "skipped"
+        assert "poc" not in output.unmapped
+
+    def test_no_poc_alias_without_verification(self):
+        output = OCSF([generate_finding_output(status="FAIL")]).data[0]
+
+        assert "verification" not in output.unmapped
+        assert "poc" not in output.unmapped
+
     def test_transform_mitre_attacks_from_multiple_finding_compliance_ids(self):
         finding = generate_finding_output(
             provider="aws",
