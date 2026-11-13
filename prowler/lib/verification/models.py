@@ -29,6 +29,21 @@ class PoC(BaseModel):
     evidence: str = ""
 
 
+class Enrichment(BaseModel):
+    """Extra attack-context attached to a verified finding by a tool.
+
+    Enrichers never change the verification outcome; they add evidence (e.g. a
+    nuclei web scan of a confirmed endpoint, or the IAM role a reachable host
+    carries). They are best-effort: a missing tool or any error is swallowed.
+    """
+
+    tool: str
+    risk: VerificationRisk = VerificationRisk.READ_ONLY
+    command: list[str] = Field(default_factory=list)
+    summary: str = ""
+    findings: list = Field(default_factory=list)
+
+
 class Verification(BaseModel):
     outcome: VerificationOutcome
     verifier: str
@@ -36,3 +51,4 @@ class Verification(BaseModel):
     reason: str = ""
     poc: Optional[PoC] = None
     cleanup_status: Optional[str] = None
+    enrichment: list[Enrichment] = Field(default_factory=list)

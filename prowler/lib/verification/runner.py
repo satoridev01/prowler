@@ -9,6 +9,7 @@ from prowler.lib.logger import logger
 from prowler.lib.outputs.common import Status
 from prowler.lib.outputs.finding import Finding
 from prowler.lib.verification.models import (
+    Enrichment,
     PoC,
     Verification,
     VerificationOutcome,
@@ -511,6 +512,215 @@ DEFAULT_ADAPTERS: tuple[VerificationAdapter, ...] = (
 )
 
 
+# ---------------------------------------------------------------------------
+# Enrichers: best-effort attack-context attached to an already-verified finding.
+# They never change the outcome and swallow every error (missing tool included).
+# ---------------------------------------------------------------------------
+
+NUCLEI_TEMPLATES_ZIP = (
+    "https://codeload.github.com/projectdiscovery/nuclei-templates/zip/refs/heads/main"
+)
+# Template groups kept from the zip: tech fingerprinting, exposed files/panels and
+# misconfigurations. Enough to turn "endpoint reachable" into "what is on it".
+NUCLEI_TEMPLATE_GROUPS = ("/http/technologies/", "/http/exposures/", "/http/misconfiguration/")
+NUCLEI_MAX_TARGETS = 3
+_nuclei_templates_dir: str | None = None
+_nuclei_unavailable = False
+_cloudfox_instances_cache: dict | None = None
+
+
+def _url_in_poc(verification: Verification) -> str | None:
+    if not verification.poc:
+        return None
+    for token in reversed(verification.poc.command):
+        if token.startswith("http://") or token.startswith("https://"):
+            return token
+    return None
+
+
+def _ensure_nuclei_templates() -> str | None:
+    """Download a subset of nuclei-templates once per process."""
+    global _nuclei_templates_dir, _nuclei_unavailable
+    if _nuclei_templates_dir or _nuclei_unavailable:
+        return _nuclei_templates_dir
+    if shutil.which("nuclei") is None:
+        _nuclei_unavailable = True
+        return None
+    import io
+    import tempfile
+    import urllib.request
+    import zipfile
+
+    try:
+        data = urllib.request.urlopen(NUCLEI_TEMPLATES_ZIP, timeout=120).read()
+        archive = zipfile.ZipFile(io.BytesIO(data))
+        members = [
+            name
+            for name in archive.namelist()
+            if name.endswith(".yaml") and any(g in name for g in NUCLEI_TEMPLATE_GROUPS)
+        ]
+        root = tempfile.mkdtemp(prefix="nuclei-templates-")
+        for name in members:
+            archive.extract(name, root)
+        inner = next(
+            (os.path.join(root, d) for d in os.listdir(root) if d.startswith("nuclei-templates")),
+            root,
+        )
+        _nuclei_templates_dir = os.path.join(inner, "http")
+        logger.info(f"nuclei templates ready ({len(members)} templates)")
+    except Exception as error:
+        logger.error(f"Could not prepare nuclei templates: {error}")
+        _nuclei_unavailable = True
+    return _nuclei_templates_dir
+
+
+def _nuclei_scan(url: str, timeout_seconds: int) -> tuple[list[dict], list[str]]:
+    import json as _json
+
+    templates = _ensure_nuclei_templates()
+    if not templates:
+        return [], []
+    argv = [
+        "nuclei", "-u", url,
+        "-t", os.path.join(templates, "technologies"),
+        "-t", os.path.join(templates, "exposures"),
+        "-t", os.path.join(templates, "misconfiguration"),
+        "-timeout", "8", "-retries", "1", "-rate-limit", "25",
+        "-ni", "-duc", "-silent", "-jsonl", "-no-color",
+    ]
+    _, stdout, _ = _run_command(argv, timeout_seconds, anonymous_aws=True)
+    matches = []
+    for line in stdout.splitlines():
+        line = line.strip()
+        if not line.startswith("{"):
+            continue
+        try:
+            record = _json.loads(line)
+        except ValueError:
+            continue
+        info = record.get("info") or {}
+        matches.append(
+            {
+                "template": record.get("template-id"),
+                "severity": info.get("severity"),
+                "name": info.get("name"),
+                "matched_at": record.get("matched-at"),
+            }
+        )
+    return matches, argv
+
+
+class Enricher(Protocol):
+    def applies_to(self, finding: Finding, verification: Verification) -> bool: ...
+
+    def enrich(
+        self, finding: Finding, verification: Verification, context: VerificationContext
+    ) -> Enrichment | None: ...
+
+
+class NucleiWebEnricher:
+    """Scan a confirmed public HTTP(S) endpoint with nuclei (read-only)."""
+
+    def applies_to(self, finding: Finding, verification: Verification) -> bool:
+        return _url_in_poc(verification) is not None
+
+    def enrich(self, finding, verification, context):
+        url = _url_in_poc(verification)
+        if not url:
+            return None
+        matches, argv = _nuclei_scan(url, max(context.timeout_seconds, 120))
+        if not argv:
+            return None
+        notable = [m for m in matches if m["severity"] not in (None, "info", "unknown")]
+        summary = (
+            f"nuclei matched {len(matches)} template(s) on {url}"
+            + (f", {len(notable)} above info" if notable else " (all informational)")
+        )
+        return Enrichment(
+            tool="nuclei", risk=VerificationRisk.READ_ONLY, command=argv,
+            summary=summary, findings=matches[:50],
+        )
+
+
+class CloudFoxInstanceRoleEnricher:
+    """Attach the IAM role a reachable EC2 host carries (attack-path context)."""
+
+    def applies_to(self, finding: Finding, verification: Verification) -> bool:
+        return finding.check_id in INSTANCE_PORT_CHECKS or finding.check_id.startswith(
+            SECURITY_GROUP_PORT_PREFIX
+        )
+
+    def _instances(self, context: VerificationContext) -> dict:
+        global _cloudfox_instances_cache
+        if _cloudfox_instances_cache is not None:
+            return _cloudfox_instances_cache
+        _cloudfox_instances_cache = {}
+        if shutil.which("cloudfox") is None:
+            return _cloudfox_instances_cache
+        import json as _json
+        import tempfile
+
+        outdir = tempfile.mkdtemp(prefix="cloudfox-")
+        argv = [
+            "cloudfox", "aws", "instances", "-y", "--skip-admin-check",
+            "--outdir", outdir, "-v", "1",
+        ]
+        _run_command(argv, max(context.timeout_seconds, 180))  # uses scan credentials
+        try:
+            path = next(
+                os.path.join(dirpath, f)
+                for dirpath, _, files in os.walk(outdir)
+                for f in files
+                if f == "instances.json"
+            )
+            for row in _json.load(open(path)):
+                ip = row.get("External IP") or row.get("ExternalIP") or row.get("PublicIP")
+                if ip and ip not in ("", "No External IP"):
+                    _cloudfox_instances_cache[str(ip)] = row
+        except (StopIteration, ValueError, OSError):
+            pass
+        return _cloudfox_instances_cache
+
+    def enrich(self, finding, verification, context):
+        url_or_ip = _url_in_poc(verification) or ""
+        ips = NetworkPortExposureAdapter._public_ips(finding)
+        probed = re.findall(r"\b\d{1,3}(?:\.\d{1,3}){3}\b", " ".join(verification.poc.command)) if verification.poc else []
+        candidates = probed or ips
+        instances = self._instances(context)
+        for ip in candidates:
+            row = instances.get(str(ip))
+            if not row:
+                continue
+            role = row.get("Role") or row.get("InstanceProfile") or "unknown"
+            privesc = str(row.get("CanPrivEscToAdmin?", "")).lower() in ("yes", "true")
+            is_admin = str(row.get("IsAdminRole?", "")).lower() in ("yes", "true")
+            tail = (
+                " cloudfox flags a privilege-escalation path from this role to admin."
+                if privesc
+                else " this role already has administrative access." if is_admin else ""
+            )
+            return Enrichment(
+                tool="cloudfox", risk=VerificationRisk.READ_ONLY,
+                command=["cloudfox", "aws", "instances"],
+                summary=(
+                    f"Reachable host {row.get('ID') or ip} carries IAM role {role}; "
+                    "its credentials are retrievable from instance metadata, a "
+                    "privilege-escalation entry point." + tail
+                ),
+                findings=[{
+                    "ip": str(ip), "instance": row.get("ID"), "role": role,
+                    "can_privesc_to_admin": privesc, "is_admin_role": is_admin,
+                }],
+            )
+        return None
+
+
+DEFAULT_ENRICHERS: tuple[Enricher, ...] = (
+    NucleiWebEnricher(),
+    CloudFoxInstanceRoleEnricher(),
+)
+
+
 def _allowed_accounts() -> set[str]:
     return {
         account.strip()
@@ -525,6 +735,7 @@ def verify_findings(
     profile: str | None = None,
     adapters: tuple[VerificationAdapter, ...] = DEFAULT_ADAPTERS,
     session: Any = None,
+    enrichers: tuple[Enricher, ...] = DEFAULT_ENRICHERS,
 ) -> list[Finding]:
     """Attach verification results to failed findings, failing closed by account."""
     allowed_accounts = _allowed_accounts()
@@ -534,8 +745,10 @@ def verify_findings(
             f"to explicitly include target account {account_id}."
         )
 
+    enrich_enabled = os.getenv("PROWLER_VERIFY_ENRICH", "1") not in ("0", "false", "no")
     context = VerificationContext(account_id=account_id, profile=profile, session=session)
     counts: dict[str, int] = {}
+    enriched = 0
     for finding in findings:
         if finding.status != Status.FAIL or finding.muted:
             continue
@@ -554,6 +767,18 @@ def verify_findings(
             )
         outcome = finding.verification.outcome.value
         counts[outcome] = counts.get(outcome, 0) + 1
+        if enrich_enabled and finding.verification.outcome == VerificationOutcome.VERIFIED:
+            for enricher in enrichers:
+                try:
+                    if not enricher.applies_to(finding, finding.verification):
+                        continue
+                    extra = enricher.enrich(finding, finding.verification, context)
+                    if extra:
+                        finding.verification.enrichment.append(extra)
+                        enriched += 1
+                except Exception as error:
+                    logger.error("Enricher failed on %s: %s", finding.check_id, error)
     summary = ", ".join(f"{k}={v}" for k, v in sorted(counts.items()))
-    print(f"Dynamic verification ({account_id}): {summary or 'no supported FAIL findings'}")
+    tail = f"; {enriched} enriched" if enriched else ""
+    print(f"Dynamic verification ({account_id}): {summary or 'no supported FAIL findings'}{tail}")
     return findings
