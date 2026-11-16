@@ -184,14 +184,9 @@ def _result(
     outcome: VerificationOutcome,
     poc: PoC | None = None,
     reason: str = "",
-    risk: VerificationRisk | None = None,
 ) -> Verification:
     return Verification(
-        outcome=outcome,
-        verifier=adapter.name,
-        risk=risk or adapter.risk,
-        reason=reason,
-        poc=poc,
+        outcome=outcome, verifier=adapter.name, risk=adapter.risk, reason=reason, poc=poc
     )
 
 
@@ -249,9 +244,6 @@ class S3AnonymousReadAdapter:
     Picks one key with an anonymous ListObjectsV2; if listing is not public,
     picks it with the scan's own read-only credentials. The proof is always an
     unsigned HeadObject: object metadata only, the body is never downloaded.
-
-    The reported risk is `passive` when the whole probe was anonymous, and
-    `read_only` only when the scan's credentials were needed to pick the key.
     """
 
     name = "aws-cli/s3-anonymous-head-object"
@@ -265,7 +257,6 @@ class S3AnonymousReadAdapter:
         bucket = finding.resource_name
         region = (finding.resource_metadata or {}).get("region") or finding.region
         listed_by = "anonymous ListObjectsV2"
-        risk = VerificationRisk.PASSIVE
         list_argv = [
             "aws", "s3api", "list-objects-v2", "--bucket", bucket,
             "--max-keys", "1", "--query", "Contents[0].Key", "--output", "text",
@@ -277,7 +268,6 @@ class S3AnonymousReadAdapter:
         key = stdout.strip() if exit_code == 0 else ""
         if key in ("", "None"):
             listed_by = "the scan's read-only credentials"
-            risk = VerificationRisk.READ_ONLY
             try:
                 response = context.boto3_session().client(
                     "s3", region_name=region
@@ -287,13 +277,11 @@ class S3AnonymousReadAdapter:
                 return _result(
                     self, VerificationOutcome.ERROR,
                     reason=f"Could not pick an object to test: {error}",
-                    risk=risk,
                 )
         if not key:
             return _result(
                 self, VerificationOutcome.SKIPPED,
                 reason="The bucket is empty; there is no object to read.",
-                risk=risk,
             )
 
         argv = [
@@ -317,14 +305,13 @@ class S3AnonymousReadAdapter:
             ),
         )
         if exit_code == 0:
-            return _result(self, VerificationOutcome.VERIFIED, poc, risk=risk)
+            return _result(self, VerificationOutcome.VERIFIED, poc)
         if exit_code is None:
-            return _result(self, VerificationOutcome.ERROR, poc, stderr, risk=risk)
+            return _result(self, VerificationOutcome.ERROR, poc, stderr)
         return _result(
             self, VerificationOutcome.NOT_REPRODUCED, poc,
             "The tested object was not publicly readable; other objects or "
             "actions may still be public.",
-            risk=risk,
         )
 
 
