@@ -7,7 +7,7 @@ name: 'AWS PoC Verification: Build and Push Image'
 on:
   push:
     branches:
-      - 'feature/aws-poc-verification'
+      - 'master'
     paths:
       - 'Dockerfile'
       - 'Dockerfile.verify'
