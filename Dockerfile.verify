@@ -11,7 +11,6 @@ FROM golang:1.25-bookworm@sha256:3b4a11519ad929d1e1d261a12cff056f0c85b735253d7d8
 
 ARG CLOUDFOX_VERSION=v2.0.5
 ARG NUCLEI_VERSION=v3.9.0
-ARG STRATUS_VERSION=v2.37.2
 
 ENV CGO_ENABLED=0
 ENV GOBIN=/opt/verification/bin
@@ -24,8 +23,6 @@ RUN mkdir -p "${GOBIN}" && \
 
 RUN go install "github.com/projectdiscovery/nuclei/v3/cmd/nuclei@${NUCLEI_VERSION}"
 
-RUN go install "github.com/datadog/stratus-red-team/v2/cmd/stratus@${STRATUS_VERSION}"
-
 FROM ${PROWLER_BASE_IMAGE}
 
 ARG AWSCLI_VERSION=1.46.3
@@ -34,11 +31,10 @@ ARG PACU_VERSION=1.7.0
 USER 0
 COPY --from=verification-tools /opt/verification/bin/cloudfox /usr/local/bin/cloudfox
 COPY --from=verification-tools /opt/verification/bin/nuclei /usr/local/bin/nuclei
-COPY --from=verification-tools /opt/verification/bin/stratus /usr/local/bin/stratus
 
 USER 1000
 RUN uv tool install "awscli==${AWSCLI_VERSION}" && \
     uv tool install "pacu==${PACU_VERSION}"
 
-# The inherited Prowler entrypoint remains unchanged. Merely installing Pacu or
-# Stratus does not authorize or enable active techniques.
+# The inherited Prowler entrypoint remains unchanged. Merely installing Pacu
+# does not authorize or enable active techniques.

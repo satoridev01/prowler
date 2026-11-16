@@ -1,6 +1,6 @@
 name: 'AWS PoC Verification: Build and Push Image'
 # Builds the opt-in verification image (Dockerfile + Dockerfile.verify, which
-# adds aws-cli, cloudfox, nuclei, pacu and stratus on top of the regular
+# adds aws-cli, cloudfox, nuclei and pacu on top of the regular
 # Prowler image) and publishes it to this fork's own GHCR, never upstream.
 # Not part of prowler-cloud/prowler's release process.
 

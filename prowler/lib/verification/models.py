@@ -43,7 +43,6 @@ class Enrichment(BaseModel):
     command: list[str] = Field(default_factory=list)
     summary: str = ""
     findings: list = Field(default_factory=list)
-    cleanup_status: Optional[str] = None
 
 
 class Verification(BaseModel):

@@ -65,39 +65,9 @@ scan it briefly holds whatever the flagged policy grants, which for an
 `Action: "*"` policy is full admin on the account for the few seconds the
 scan takes.
 
-## Active enricher (stratus)
-
-`StratusS3ExfiltrationEnricher` runs the Stratus Red Team technique
-`aws.exfiltration.s3-backdoor-bucket-policy` once an `s3_bucket_public_*`
-finding is already VERIFIED. It never touches the flagged bucket: stratus
-warms up its own disposable bucket, backdoors that bucket's policy, and the
-result is attached to every qualifying finding in the scan (it runs at most
-once per process).
-
-Its own local state (`~/.stratus-red-team`) is **not** trusted for cleanup:
-that state does not survive a crash or a fresh container, so this was found
-to leave a real, orphaned bucket behind in exactly that scenario during
-testing. The enricher always re-checks with a fresh `head-bucket` call after
-`stratus cleanup` and deletes the bucket itself if it is still there;
-`cleanup_status` reflects that independent check, not stratus's own report.
-
-Inert unless all three are set, separate from the pacu opt-ins above since
-this creates and destroys real infrastructure rather than toggling one
-policy:
-
-```sh
-export PROWLER_VERIFY_ACTIVE=1
-export PROWLER_VERIFY_ACTIVE_STRATUS=1
-export PROWLER_VERIFY_ACTIVE_OPERATOR_PROFILE=awsgoat  # needs a region configured
-```
-
-The operator profile must have a region configured (or the scan's region is
-passed through as `AWS_REGION`): unlike the AWS CLI, stratus does not fall
-back to a profile's default region and simply fails without one.
-
 ## Verification image
 
-The opt-in image includes AWS CLI, CloudFox, Nuclei, Pacu, and Stratus Red Team:
+The opt-in image includes AWS CLI, CloudFox, Nuclei, and Pacu:
 
 ```sh
 docker build -t prowler-satori:local .
@@ -106,9 +76,17 @@ docker build -f Dockerfile.verify \
   -t prowler-satori:verify .
 ```
 
-Only registered adapters/enrichers can execute tools; both pacu and stratus
-are now wired as described above. Any future active adapter must require a
-separate attacker identity or disposable test infrastructure, a target
-account allowlist, cleanup that is independently re-verified against the
-real cloud state (not a tool's own local bookkeeping), and a recorded
-cleanup result.
+Only registered adapters/enrichers can execute tools; pacu is wired as
+described above. Any future active adapter must require a separate attacker
+identity or disposable test infrastructure, a target account allowlist,
+cleanup that is independently re-verified against the real cloud state (not
+a tool's own local bookkeeping), and a recorded cleanup result.
+
+A Stratus Red Team enricher (S3 exfiltration) was built and validated this
+way, then removed: its result only ever reached `verification.enrichment`,
+and Satori's own issue ingestion drops that field regardless of which tool
+populated it, so it never became visible where this fork's output is
+actually consumed. `NucleiWebEnricher`/`CloudFoxInstanceRoleEnricher` hit the
+same ceiling but stay, since their output is still useful for local/CLI
+runs. Reintroduce an active enricher only once something downstream of
+Prowler actually surfaces `enrichment`.
