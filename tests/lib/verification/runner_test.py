@@ -17,7 +17,7 @@ from tests.lib.outputs.fixtures.fixtures import generate_finding_output
 def test_verification_fails_closed_without_account_allowlist(monkeypatch):
     monkeypatch.delenv("PROWLER_VERIFY_ALLOWED_ACCOUNT_IDS", raising=False)
 
-    with pytest.raises(ValueError, match="explicitly include target account"):
+    with pytest.raises(ValueError, match="explicitly include the audited account"):
         verify_findings([], account_id="123456789012")
 
 
@@ -456,8 +456,8 @@ def test_cloudfox_uses_the_external_ip_field_name(monkeypatch):
 def _active_env(monkeypatch):
     monkeypatch.setenv("PROWLER_VERIFY_ACTIVE", "1")
     monkeypatch.setenv("PROWLER_VERIFY_ACTIVE_OPERATOR_PROFILE", "awsgoat-deployer")
-    monkeypatch.setenv("PROWLER_VERIFY_ACTIVE_TARGET_PROFILE", "awsgoat-attacker")
-    monkeypatch.setenv("PROWLER_VERIFY_ACTIVE_TARGET_USER", "awsgoat-attacker")
+    monkeypatch.setenv("PROWLER_VERIFY_ACTIVE_TARGET_PROFILE", "awsgoat-privesc-test-user")
+    monkeypatch.setenv("PROWLER_VERIFY_ACTIVE_TARGET_USER", "awsgoat-privesc-test-user")
 
 
 def test_pacu_adapter_is_inert_without_full_opt_in(monkeypatch):

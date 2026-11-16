@@ -1124,7 +1124,7 @@ def verify_findings(
     if account_id not in allowed_accounts:
         raise ValueError(
             "Dynamic verification refused: set PROWLER_VERIFY_ALLOWED_ACCOUNT_IDS "
-            f"to explicitly include target account {account_id}."
+            f"to explicitly include the audited account {account_id}."
         )
 
     enrich_enabled = os.getenv("PROWLER_VERIFY_ENRICH", "1") not in ("0", "false", "no")

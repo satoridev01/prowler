@@ -56,8 +56,8 @@ allowlist):
 ```sh
 export PROWLER_VERIFY_ACTIVE=1
 export PROWLER_VERIFY_ACTIVE_OPERATOR_PROFILE=awsgoat   # can attach/detach policies
-export PROWLER_VERIFY_ACTIVE_TARGET_PROFILE=awsgoat-attacker  # pacu runs as this
-export PROWLER_VERIFY_ACTIVE_TARGET_USER=awsgoat-attacker
+export PROWLER_VERIFY_ACTIVE_TARGET_PROFILE=awsgoat-privesc-test-user  # pacu runs as this
+export PROWLER_VERIFY_ACTIVE_TARGET_USER=awsgoat-privesc-test-user
 ```
 
 Use a disposable test principal for the target, never a real one: during the
