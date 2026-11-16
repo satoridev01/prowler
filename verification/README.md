@@ -12,7 +12,7 @@ AWSGoat account without permitting dynamic checks against the Satori account.
 
 ```sh
 export PROWLER_VERIFY_ALLOWED_ACCOUNT_IDS=959479862535
-prowler aws --profile satori-scout --verify
+prowler aws --profile satori-readonly-auditor --verify
 ```
 
 Never point `PROWLER_VERIFY_ALLOWED_ACCOUNT_IDS` at a production account.
