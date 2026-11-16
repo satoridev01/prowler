@@ -1,5 +1,6 @@
 import json
 import re
+import shlex
 from datetime import datetime, timezone
 from io import StringIO
 from typing import Optional
@@ -31,6 +32,7 @@ from pydantic.v1 import BaseModel as V1BaseModel
 from prowler.config.config import prowler_version
 from prowler.lib.outputs.ocsf.ocsf import OCSF
 from prowler.lib.verification.models import (
+    Enrichment,
     PoC,
     Verification,
     VerificationOutcome,
@@ -182,6 +184,38 @@ class TestOCSF:
         assert output.unmapped["verification"]["outcome"] == "verified"
         assert output.unmapped["poc"]["tool"] == "aws-cli"
         assert "exploitation" not in output.unmapped
+
+    def test_poc_command_is_a_single_shell_ready_element(self):
+        """Dashboards render `command` joined by spaces: a raw argv holding a
+        multi-line `python3 -c` script is not pasteable. The serialized command
+        must round-trip to the original argv when parsed like a shell would."""
+        argv = [
+            "python3",
+            "-c",
+            "import socket,sys\nhost,port=sys.argv[1],int(sys.argv[2])\nprint(f'{host}')",
+            "203.0.113.10",
+            "22",
+        ]
+        verification = Verification(
+            outcome=VerificationOutcome.VERIFIED,
+            verifier="python/tcp-connect",
+            risk=VerificationRisk.PASSIVE,
+            poc=PoC(tool="python3 socket", command=argv),
+            enrichment=[Enrichment(tool="cloudfox", command=["cloudfox", "aws", "instances"])],
+        )
+        output = OCSF(
+            [generate_finding_output(status="FAIL", verification=verification)]
+        ).data[0]
+
+        for command in (
+            output.unmapped["verification"]["poc"]["command"],
+            output.unmapped["poc"]["command"],
+        ):
+            assert len(command) == 1
+            assert shlex.split(command[0]) == argv
+        enrichment_command = output.unmapped["verification"]["enrichment"][0]["command"]
+        assert enrichment_command == ["cloudfox aws instances"]
+        assert verification.poc.command == argv
 
     def test_no_poc_alias_when_verification_has_no_poc(self):
         verification = Verification(

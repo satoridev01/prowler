@@ -28,6 +28,7 @@ from prowler.lib.logger import logger
 from prowler.lib.outputs.finding import Finding
 from prowler.lib.outputs.output import Output
 from prowler.lib.outputs.utils import is_plain_json, unroll_dict_to_list
+from prowler.lib.verification.models import verification_output
 
 
 class OCSF(Output):
@@ -188,8 +189,8 @@ class OCSF(Output):
                         "provider": finding.provider,
                         **(
                             {
-                                "verification": finding.verification.dict(
-                                    exclude_none=True
+                                "verification": verification_output(
+                                    finding.verification
                                 ),
                                 # "outcome" is already the cross-tool name (jsspector's
                                 # own --verify uses the same one); no separate
@@ -198,9 +199,9 @@ class OCSF(Output):
                                 # flatter shape where poc sits next to outcome.
                                 **(
                                     {
-                                        "poc": finding.verification.poc.dict(
-                                            exclude_none=True
-                                        )
+                                        "poc": verification_output(
+                                            finding.verification
+                                        )["poc"]
                                     }
                                     if finding.verification.poc
                                     else {}

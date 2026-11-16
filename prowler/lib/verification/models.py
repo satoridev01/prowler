@@ -1,3 +1,4 @@
+import shlex
 from enum import Enum
 from typing import Optional
 
@@ -53,3 +54,16 @@ class Verification(BaseModel):
     poc: Optional[PoC] = None
     cleanup_status: Optional[str] = None
     enrichment: list[Enrichment] = Field(default_factory=list)
+
+
+def verification_output(verification: Verification) -> dict:
+    """Serialize for reports, with each command as one shell-escaped element.
+
+    Consumers render ``command`` joined by spaces, so a raw argv holding a
+    multi-line ``python3 -c`` script breaks when pasted into a shell.
+    """
+    data = verification.dict(exclude_none=True)
+    for holder in [data.get("poc"), *data.get("enrichment", [])]:
+        if holder and holder.get("command"):
+            holder["command"] = [shlex.join(holder["command"])]
+    return data
