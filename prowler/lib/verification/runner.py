@@ -244,10 +244,14 @@ class S3AnonymousReadAdapter:
     Picks one key with an anonymous ListObjectsV2; if listing is not public,
     picks it with the scan's own read-only credentials. The proof is always an
     unsigned HeadObject: object metadata only, the body is never downloaded.
+
+    The risk describes the PoC command, which is always anonymous, so it is
+    passive. The scan's credentials, when used, only choose the key's name and
+    the evidence says so.
     """
 
     name = "aws-cli/s3-anonymous-head-object"
-    risk = VerificationRisk.READ_ONLY
+    risk = VerificationRisk.PASSIVE
     check_ids = {"s3_bucket_public_access"}
 
     def supports(self, finding: Finding) -> bool:

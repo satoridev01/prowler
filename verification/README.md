@@ -27,7 +27,7 @@ target and request bodies are never sent.
 | Checks | Proof | Risk |
 |---|---|---|
 | `s3_bucket_public_list_acl` | unsigned `aws s3api head-bucket` | passive |
-| `s3_bucket_public_access` | unsigned `aws s3api head-object` on one key (metadata only). The key comes from an anonymous `list-objects-v2`, or from the scan's own read-only credentials when listing is not public | read_only |
+| `s3_bucket_public_access` | unsigned `aws s3api head-object` on one key (metadata only). The key comes from an anonymous `list-objects-v2`, or from the scan's own read-only credentials when listing is not public (those only pick the key's name; the proof is always unsigned) | passive |
 | `ec2_instance_port_*_exposed_to_internet`, `ec2_securitygroup_allow_ingress_from_internet_to_tcp_port_*` | TCP connect to the public IP(s) and read the service banner | passive |
 | `apigateway_restapi_authorizers_enabled`, `apigateway_restapi_public` | unauthenticated `GET` to a deployed method whose authorization is `NONE`. Methods other than GET are never called | passive |
 | `elbv2_ssl_listeners` | `GET` over plain HTTP to each listener that does not redirect | passive |

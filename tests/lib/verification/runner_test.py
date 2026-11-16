@@ -3,7 +3,7 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-from prowler.lib.verification.models import VerificationOutcome
+from prowler.lib.verification.models import VerificationOutcome, VerificationRisk
 from prowler.lib.verification.runner import (
     CloudFoxInstanceRoleEnricher,
     PacuPrivescAdapter,
@@ -254,6 +254,7 @@ def test_s3_public_read_uses_unsigned_head_object(monkeypatch):
         result = verify_findings([finding], account_id="123456789012")[0]
 
     assert result.verification.outcome == VerificationOutcome.VERIFIED
+    assert result.verification.risk == VerificationRisk.PASSIVE
     head_object = command.call_args_list[1].args[0]
     assert head_object[:3] == ["aws", "s3api", "head-object"]
     assert "--no-sign-request" in head_object and "index.html" in head_object
@@ -284,6 +285,7 @@ def test_s3_public_read_falls_back_to_scan_credentials_for_listing(monkeypatch):
     assert result.verification.outcome == VerificationOutcome.VERIFIED
     assert "build/app.js" in result.verification.poc.command
     assert "read-only credentials" in result.verification.poc.evidence
+    assert result.verification.risk == VerificationRisk.PASSIVE
 
 
 def test_verified_http_finding_is_enriched_with_nuclei(monkeypatch):
